@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>MacArthur Immersive Walk Test (1:1)</title>
-<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<title>MacArthur Immersive Walk Test (1:1) — raw WebXR</title>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #111; font-family: system-ui, sans-serif; }
+  #c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   #overlay {
     position: fixed; top: 0; left: 0; right: 0; z-index: 10;
     padding: 10px 12px; color: #fff;
@@ -22,11 +22,10 @@
   #btn-walk { background: #4caf7d; color: #fff; }
   #btn-walk:disabled { background: #555; color: #bbb; }
   #btn-exit-xr { background: #b05252; color: #fff; }
-  #btn-back { background: #333; color: #fff; }
   #hud {
     margin-top: 8px; font-size: 12px; line-height: 1.5; white-space: pre-wrap;
     background: rgba(0,0,0,.55); border-radius: 8px; padding: 8px 10px;
-    pointer-events: none; max-width: 520px;
+    pointer-events: none; max-width: 560px; font-family: monospace;
   }
   #hint {
     position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
@@ -42,232 +41,280 @@
     position: absolute; left: 50%; top: 50%; width: 48px; height: 48px;
     margin: -24px 0 0 -24px; border-radius: 50%; background: rgba(255,255,255,.75);
   }
-  a-scene { position: fixed; inset: 0; }
 </style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
 </head>
 <body>
 
 <div id="overlay">
   <div class="row">
     <button id="btn-walk">Enter 1:1 Walk (WebXR)</button>
-    <button id="btn-exit-xr" class="hidden" style="display:none;">Exit Walk</button>
-    <button id="btn-back" onclick="location.href='../testnewgbr/index.html'">← Main App</button>
+    <button id="btn-exit-xr" style="display:none;">Exit Walk</button>
   </div>
-  <div id="hud">checking WebXR support…</div>
+  <div id="hud">starting…</div>
 </div>
 
 <div id="joystick-zone"><div id="joystick-knob"></div></div>
 <div id="hint">Drag to look · Joystick to glide · Walk button for real 1:1</div>
+<canvas id="c"></canvas>
 
-<!-- Same MacArthur data as testnewgbr/app.js, copied (not imported) so main file is untouched -->
-<a-scene
-  id="scene"
-  vr-mode-ui="enabled: false"
-  device-orientation-permission-ui="enabled: false"
-  webxr="referenceSpaceType: local-floor; requiredFeatures: local-floor; optionalFeatures: hit-test;"
-  renderer="colorManagement: true"
->
-  <a-entity id="rig" position="0 1.6 0">
-    <a-entity id="test-camera" camera
-      look-controls="touchEnabled: true; mouseEnabled: true; magicWindowTrackingEnabled: true"
-      joystick-rig-move="speed: 0.004"></a-entity>
-  </a-entity>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-  <!-- Skybox (same file/scale as main app) -->
-  <a-entity gltf-model="./assets/beachskybox.optimized.glb"
-    position="0 0 0" scale="100 100 100"></a-entity>
+const hud = document.getElementById('hud');
+const btnWalk = document.getElementById('btn-walk');
+const btnExit = document.getElementById('btn-exit-xr');
+const hint = document.getElementById('hint');
+const zone = document.getElementById('joystick-zone');
+const knob = document.getElementById('joystick-knob');
 
-  <!-- MacArthur model (same transform as main app) -->
-  <a-entity gltf-model="./assets/mcarthur.optimized.glb"
-    position="0 0 -3" rotation="0 270 0" scale="3.5 3.5 3.5"></a-entity>
+let renderer, scene, camera, rig;
+let xrSession = null;
+let xrSupported = false;
+let modelsStatus = 'loading…';
+let lastError = '';
+// drag-look state (non-XR only)
+let yaw = 0, pitch = 0;
 
-  <!-- Walk-test helpers (NOT in main app): floor grid + 1m markers so real steps are visible -->
-  <a-entity id="walk-grid" geometry="primitive: plane; width: 20; height: 20"
-    rotation="-90 0 0" position="0 0.01 0"
-    material="color: #00ff88; wireframe: true; opacity: 0.35; transparent: true"></a-entity>
-  <a-entity geometry="primitive: sphere; radius: 0.06" material="color: #ff3333"
-    position="0 1 -1"></a-entity>
-  <a-entity geometry="primitive: sphere; radius: 0.06" material="color: #3388ff"
-    position="0 1 -2"></a-entity>
+window.addEventListener('error', (e) => {
+  lastError = 'JS error: ' + (e.message || e.error);
+});
 
-  <a-light type="ambient" color="#ffffff" intensity="0.6"></a-light>
-  <a-light type="directional" color="#ffffff" intensity="0.4" position="-1 2 1"></a-light>
-</a-scene>
+function fmt(v) { return v.x.toFixed(2) + ', ' + v.y.toFixed(2) + ', ' + v.z.toFixed(2); }
 
-<script>
-  // Joystick moves the RIG (works in both magic-window + XR).
-  // Copied pattern from testnewgbr/app.js joystick-movement, retargeted to #rig.
-  AFRAME.registerComponent("joystick-rig-move", {
-    schema: { speed: { default: 0.004 } },
-    init: function () {
-      this.moveVector = { x: 0, y: 0 };
-      this.zone = document.getElementById("joystick-zone");
-      this.knob = document.getElementById("joystick-knob");
-      this.rig = document.getElementById("rig");
-      this.active = false;
-      this.maxDist = 40;
-      this.center = { x: 0, y: 0 };
-      this.start = this.start.bind(this);
-      this.move = this.move.bind(this);
-      this.end = this.end.bind(this);
-      this.zone.addEventListener("touchstart", this.start, { passive: false });
-      this.zone.addEventListener("mousedown", this.start);
-      window.addEventListener("touchmove", this.move, { passive: false });
-      window.addEventListener("mousemove", this.move);
-      window.addEventListener("touchend", this.end);
-      window.addEventListener("touchcancel", this.end);
-      window.addEventListener("mouseup", this.end);
-    },
-    start: function (e) {
-      e.preventDefault();
-      this.active = true;
-      var cx = e.touches ? e.touches[0].clientX : e.clientX;
-      var cy = e.touches ? e.touches[0].clientY : e.clientY;
-      var rect = this.zone.getBoundingClientRect();
-      this.center.x = rect.left + rect.width / 2;
-      this.center.y = rect.top + rect.height / 2;
-      this.update(cx, cy);
-    },
-    move: function (e) {
-      if (!this.active) return;
-      if (e.touches && e.touches.length > 1) return;
-      e.preventDefault();
-      var cx = e.touches ? e.touches[0].clientX : e.clientX;
-      var cy = e.touches ? e.touches[0].clientY : e.clientY;
-      this.update(cx, cy);
-    },
-    end: function () {
-      if (!this.active) return;
-      this.active = false;
-      this.moveVector.x = 0; this.moveVector.y = 0;
-      this.knob.style.transform = "translate(0px, 0px)";
-    },
-    update: function (x, y) {
-      var dx = x - this.center.x, dy = y - this.center.y;
-      var dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist > this.maxDist) {
-        var a = Math.atan2(dy, dx);
-        dx = Math.cos(a) * this.maxDist; dy = Math.sin(a) * this.maxDist;
-      }
-      this.knob.style.transform = "translate(" + dx + "px," + dy + "px)";
-      this.moveVector.x = dx / this.maxDist; this.moveVector.y = dy / this.maxDist;
-    },
-    tick: function (_t, dt) {
-      if (!this.active) return;
-      var cam = this.el.object3D;
-      var dir = new THREE.Vector3();
-      cam.getWorldDirection(dir); dir.y = 0; dir.normalize();
-      var right = new THREE.Vector3();
-      right.crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
-      var s = this.data.speed * dt;
-      this.rig.object3D.position.add(dir.multiplyScalar(this.moveVector.y * s));
-      this.rig.object3D.position.add(right.multiplyScalar(-this.moveVector.x * s));
-    }
-  });
-
-  var hud = document.getElementById("hud");
-  var btnWalk = document.getElementById("btn-walk");
-  var btnExitXr = document.getElementById("btn-exit-xr");
-  var sceneEl = document.getElementById("scene");
-  var xrSession = null;
-  var xrSupported = false;
-
-  function setHud(extra) {
-    var cam = document.getElementById("test-camera");
-    var p = new THREE.Vector3();
-    if (cam && cam.object3D) cam.object3D.getWorldPosition(p);
-    var presenting = false, refType = "n/a";
+function updateHud() {
+  if (!renderer) { hud.textContent = 'starting…'; return; }
+  const presenting = renderer.xr.isPresenting;
+  let refType = 'n/a';
+  try {
+    refType = renderer.xr.getReferenceSpaceType ? renderer.xr.getReferenceSpaceType() : 'unknown';
+  } catch (e) {}
+  const view = new THREE.Vector3();
+  camera.getWorldPosition(view);
+  let raw = 'n/a (no XR session)';
+  if (presenting) {
     try {
-      presenting = !!(sceneEl.renderer && sceneEl.renderer.xr && sceneEl.renderer.xr.isPresenting);
-      refType = sceneEl.renderer.xr.getReferenceSpaceType
-        ? sceneEl.renderer.xr.getReferenceSpaceType()
-        : (sceneEl.renderer.xr.referenceSpaceType || "unknown");
-    } catch (e) {}
-    hud.textContent =
-      "Model: MacArthur (same as main app)\n" +
-      "XR supported: " + (xrSupported ? "YES — 1:1 walk available" : "NO — joystick only on this device/browser") + "\n" +
-      "XR session: " + (xrSession ? "ACTIVE — walk in real life to move" : "inactive (magic-window + joystick)") + "\n" +
-      "Presenting: " + presenting + " | refSpace: " + refType + "\n" +
-      "Camera world pos: " + p.x.toFixed(2) + ", " + p.y.toFixed(2) + ", " + p.z.toFixed(2) + "\n" +
-      (extra ? extra : "");
+      const xrCam = renderer.xr.getCamera();
+      const rp = new THREE.Vector3();
+      xrCam.getWorldPosition(rp);
+      raw = fmt(rp);
+    } catch (e) { raw = 'unreadable: ' + e.message; }
   }
+  hud.textContent =
+    'Models: ' + modelsStatus + '\n' +
+    'XR supported: ' + (xrSupported ? 'YES' : 'NO — joystick only here') + '\n' +
+    'Session: ' + (xrSession ? 'ACTIVE' : 'inactive') +
+    ' | presenting: ' + presenting + ' | refSpace: ' + refType + '\n' +
+    'RAW tracking pos: ' + raw + '\n' +
+    'View pos (world): ' + fmt(view) + '\n' +
+    (lastError ? lastError + '\n' : '') +
+    (xrSession ? 'Walk 2-3 steps — RAW tracking pos MUST change.' : 'Tap Walk, grant camera, then walk.');
+}
 
-  // iOS permission (harmless on Android, keeps parity with main app)
-  async function ensureOrientationPermission() {
-    try {
-      if (typeof DeviceOrientationEvent !== "undefined" &&
-          typeof DeviceOrientationEvent.requestPermission === "function") {
-        await DeviceOrientationEvent.requestPermission();
-      }
-    } catch (e) { console.warn(e); }
+// ---- three.js scene (same transforms as main app immersive) ----
+renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+
+scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 500);
+rig = new THREE.Group();
+rig.position.set(0, 1.6, 0); // magic-window eye height; zeroed during XR (local-floor already has eye height)
+rig.add(camera);
+scene.add(rig);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+dirLight.position.set(-1, 2, 1);
+scene.add(dirLight);
+
+// Walk-test helpers: floor grid + 1m/2m markers so real steps are visible
+const grid = new THREE.GridHelper(20, 20, 0x00ff88, 0x00ff88);
+grid.position.y = 0.01;
+grid.material.transparent = true;
+grid.material.opacity = 0.35;
+scene.add(grid);
+function marker(color, z) {
+  const m = new THREE.Mesh(
+    new THREE.SphereGeometry(0.06, 16, 16),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  m.position.set(0, 1, z);
+  scene.add(m);
+}
+marker(0xff3333, -1);
+marker(0x3388ff, -2);
+
+// Same MacArthur assets/transforms as testnewgbr/app.js immersive mode
+const loader = new GLTFLoader();
+let pending = 2;
+function doneOne(label) {
+  pending--;
+  modelsStatus = pending <= 0 ? 'ready' : label + ' loaded…';
+}
+loader.load('./assets/beachskybox.optimized.glb', (gltf) => {
+  gltf.scene.position.set(0, 0, 0);
+  gltf.scene.scale.set(100, 100, 100);
+  scene.add(gltf.scene);
+  doneOne('skybox');
+}, undefined, (err) => { modelsStatus = 'skybox FAILED: ' + err.message; });
+loader.load('./assets/mcarthur.optimized.glb', (gltf) => {
+  gltf.scene.position.set(0, 0, -3);
+  gltf.scene.rotation.set(0, THREE.MathUtils.degToRad(270), 0);
+  gltf.scene.scale.set(3.5, 3.5, 3.5);
+  scene.add(gltf.scene);
+  doneOne('model');
+}, undefined, (err) => { modelsStatus = 'model FAILED: ' + err.message; });
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---- drag-to-look (non-XR only; ignored on joystick/overlay) ----
+let dragging = false, lx = 0, ly = 0;
+window.addEventListener('pointerdown', (e) => {
+  if (e.target.closest && e.target.closest('#joystick-zone, #overlay, button')) return;
+  dragging = true; lx = e.clientX; ly = e.clientY;
+});
+window.addEventListener('pointermove', (e) => {
+  if (!dragging || renderer.xr.isPresenting) return;
+  yaw -= (e.clientX - lx) * 0.005;
+  pitch -= (e.clientY - ly) * 0.005;
+  pitch = Math.max(-1.4, Math.min(1.4, pitch));
+  lx = e.clientX; ly = e.clientY;
+});
+window.addEventListener('pointerup', () => { dragging = false; });
+window.addEventListener('pointercancel', () => { dragging = false; });
+
+// ---- joystick glide (moves rig; works in both modes) ----
+const joy = { active: false, x: 0, y: 0, cx: 0, cy: 0, max: 40 };
+zone.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  joy.active = true;
+  const r = zone.getBoundingClientRect();
+  joy.cx = r.left + r.width / 2; joy.cy = r.top + r.height / 2;
+  joyMove(e.clientX, e.clientY);
+  zone.setPointerCapture(e.pointerId);
+});
+zone.addEventListener('pointermove', (e) => {
+  if (joy.active) { e.preventDefault(); joyMove(e.clientX, e.clientY); }
+});
+function joyEnd() {
+  joy.active = false; joy.x = 0; joy.y = 0;
+  knob.style.transform = 'translate(0px, 0px)';
+}
+zone.addEventListener('pointerup', joyEnd);
+zone.addEventListener('pointercancel', joyEnd);
+function joyMove(x, y) {
+  let dx = x - joy.cx, dy = y - joy.cy;
+  const d = Math.hypot(dx, dy);
+  if (d > joy.max) { dx *= joy.max / d; dy *= joy.max / d; }
+  knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+  joy.x = dx / joy.max; joy.y = dy / joy.max;
+}
+const UP = new THREE.Vector3(0, 1, 0);
+function tickJoystick(dt) {
+  if (!joy.active) return;
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd); fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); else fwd.normalize();
+  const right = new THREE.Vector3().crossVectors(fwd, UP).normalize();
+  // push up = forward, push right = strafe right
+  const s = 0.004 * dt;
+  rig.position.addScaledVector(fwd, -joy.y * s);
+  rig.position.addScaledVector(right, joy.x * s);
+}
+
+// ---- render loop ----
+let lastT = performance.now();
+renderer.setAnimationLoop(() => {
+  const now = performance.now();
+  const dt = Math.min(100, now - lastT);
+  lastT = now;
+  if (!renderer.xr.isPresenting) {
+    rig.rotation.set(0, yaw, 0);
+    camera.rotation.set(pitch, 0, 0);
   }
+  tickJoystick(dt);
+  renderer.render(scene, camera);
+});
+setInterval(updateHud, 500);
 
-  async function checkXrSupport() {
-    if (!("xr" in navigator)) { xrSupported = false; setHud(); btnWalk.disabled = true; btnWalk.textContent = "WebXR not in this browser"; return; }
-    try {
-      xrSupported = await navigator.xr.isSessionSupported("immersive-ar");
-    } catch (e) { xrSupported = false; }
-    if (!xrSupported) { btnWalk.disabled = true; btnWalk.textContent = "1:1 Walk not supported here"; }
-    setHud();
+// ---- WebXR session ----
+async function checkSupport() {
+  if (!('xr' in navigator)) {
+    btnWalk.disabled = true;
+    btnWalk.textContent = 'WebXR not in this browser';
+    updateHud();
+    return;
   }
+  try {
+    xrSupported = await navigator.xr.isSessionSupported('immersive-ar');
+  } catch (e) { xrSupported = false; }
+  if (!xrSupported) {
+    btnWalk.disabled = true;
+    btnWalk.textContent = '1:1 Walk not supported here';
+  }
+  updateHud();
+}
 
-  btnWalk.addEventListener("click", async function () {
-    await ensureOrientationPermission();
-    // Secure-context check: raw file:// or plain http:// LAN hosts have no navigator.xr
-    if (!("xr" in navigator)) {
-      setHud("WebXR missing: open this page over HTTPS (Vercel) or http://localhost, in Chrome Android.");
-      return;
+renderer.xr.addEventListener('sessionstart', () => {
+  rig.position.set(0, 0, 0); // local-floor: y=0 is the floor, pose already includes eye height
+  rig.rotation.set(0, 0, 0);
+  yaw = 0; pitch = 0;
+  btnExit.style.display = 'inline-block';
+  btnWalk.disabled = true;
+  hint.textContent = 'Walk in real life — RAW tracking pos must change';
+  updateHud();
+});
+renderer.xr.addEventListener('sessionend', () => {
+  xrSession = null;
+  rig.position.set(0, 1.6, 0);
+  rig.rotation.set(0, 0, 0);
+  yaw = 0; pitch = 0;
+  btnExit.style.display = 'none';
+  btnWalk.disabled = !xrSupported;
+  hint.textContent = 'Drag to look · Joystick to glide · Walk button for real 1:1';
+  updateHud();
+});
+
+btnWalk.addEventListener('click', async () => {
+  lastError = '';
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try { await DeviceOrientationEvent.requestPermission(); } catch (e) {}
     }
-    try {
-      xrSession = await navigator.xr.requestSession("immersive-ar", {
-        requiredFeatures: ["local-floor"],
-        optionalFeatures: ["hit-test"]
-      });
-      // BUGFIX: three.js defaults to the "viewer" reference space (rotation only).
-      // Without this line, walking in real life does NOT move the camera — exactly
-      // the symptom reported. local-floor gives true 1:1 positional tracking.
-      if (sceneEl.renderer.xr.setReferenceSpaceType) {
-        sceneEl.renderer.xr.setReferenceSpaceType("local-floor");
-      }
-      // BUGFIX 2: look-controls (magic window gyro) fights the XR headset pose every
-      // frame. Disable it while the XR session owns the camera.
-      var camEl = document.getElementById("test-camera");
-      var rigEl = document.getElementById("rig");
-      // In local-floor space y=0 is the floor and the XR pose already includes eye
-      // height (~1.6m). Drop the magic-window rig offset or the user floats at ~3.2m.
-      rigEl.setAttribute("data-saved-y", rigEl.getAttribute("position").y);
-      rigEl.setAttribute("position", "0 0 0");
-      camEl.setAttribute("look-controls", "enabled", false);
-      // Hand the session to A-Frame's WebGL renderer = true 1:1 phone pose tracking.
-      await sceneEl.renderer.xr.setSession(xrSession);
-      btnExitXr.style.display = "inline-block";
-      btnWalk.disabled = true;
-      document.getElementById("hint").textContent = "Walk in real life — camera moves 1:1";
-      xrSession.addEventListener("end", function () {
-        xrSession = null;
-        document.getElementById("test-camera").setAttribute("look-controls", "enabled", true);
-        var rigEl = document.getElementById("rig");
-        var savedY = rigEl.getAttribute("data-saved-y");
-        rigEl.setAttribute("position", "0 " + (savedY !== null ? savedY : 1.6) + " 0");
-        btnExitXr.style.display = "none";
-        btnWalk.disabled = false;
-        document.getElementById("hint").textContent = "Drag to look · Joystick to glide · Walk button for real 1:1";
-        setHud();
-      });
-      setHud();
-    } catch (err) {
-      console.error(err);
-      setHud("Could not start walk mode: " + (err && err.message ? err.message : err) + "\nTip: use Chrome on Android, HTTPS, ARCore-enabled phone.");
-    }
-  });
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['hit-test']
+    });
+    await renderer.xr.setSession(xrSession);
+  } catch (err) {
+    xrSession = null;
+    lastError = 'Walk start failed: ' + (err && err.message ? err.message : err);
+    updateHud();
+  }
+});
+btnExit.addEventListener('click', async () => {
+  try { if (xrSession) await xrSession.end(); } catch (e) {}
+});
 
-  btnExitXr.addEventListener("click", async function () {
-    try { if (xrSession) await xrSession.end(); } catch (e) { console.warn(e); }
-  });
-
-  sceneEl.addEventListener("loaded", function () { checkXrSupport(); });
-  setInterval(setHud, 500);
-  checkXrSupport();
+checkSupport();
+updateHud();
 </script>
 </body>
 </html>
