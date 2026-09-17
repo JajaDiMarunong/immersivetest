@@ -81,6 +81,7 @@ let xrSession = null;
 let xrSupported = false;
 let modelsStatus = 'loading…';
 let lastError = '';
+const BUILD = 'v4-gyrofix'; // bump on every push so phone tests can confirm fresh code
 // drag-look state (non-XR only; drag adds an offset on top of gyro)
 let yaw = 0, pitch = 0;       // drag offsets
 let gyroYaw = 0, gyroPitch = 0; // magic-window gyro base
@@ -90,8 +91,14 @@ function onDeviceOrientation(e) {
   if (e.alpha === null || e.alpha === undefined || e.beta === null) return;
   if (alpha0 === null) alpha0 = e.alpha; // calibrate: face the model on load
   gyroActive = true;
-  // Portrait-held phone: alpha = compass heading, beta = 90 when upright.
-  gyroYaw = THREE.MathUtils.degToRad(e.alpha - alpha0);
+  // Portrait-held phone: alpha = compass heading (0=N, increases turning right),
+  // beta = 90 when upright. three.js +Y rotation turns the view LEFT, so yaw must
+  // be negated or the view mirrors your turns. Diff is wrapped to [-180, 180] so
+  // crossing North doesn't snap the view around.
+  let diff = (e.alpha - alpha0) % 360;
+  if (diff > 180) diff -= 360;
+  if (diff < -180) diff += 360;
+  gyroYaw = -THREE.MathUtils.degToRad(diff);
   gyroPitch = THREE.MathUtils.degToRad(e.beta - 90);
 }
 window.addEventListener('deviceorientation', onDeviceOrientation);
@@ -117,10 +124,9 @@ function fmt(v) { return v.x.toFixed(2) + ', ' + v.y.toFixed(2) + ', ' + v.z.toF
 function updateHud() {
   if (!renderer) { hud.textContent = 'starting…'; return; }
   const presenting = renderer.xr.isPresenting;
-  let refType = 'n/a';
-  try {
-    refType = renderer.xr.getReferenceSpaceType ? renderer.xr.getReferenceSpaceType() : 'unknown';
-  } catch (e) {}
+  // NOTE: three r160 WebXRManager has setReferenceSpaceType but no getter,
+  // so we display the value we requested (verified: setSession uses it).
+  const refType = presenting ? 'local-floor (requested)' : 'local-floor (will request)';
   const view = new THREE.Vector3();
   camera.getWorldPosition(view);
   let raw = 'n/a (no XR session)';
@@ -133,6 +139,7 @@ function updateHud() {
     } catch (e) { raw = 'unreadable: ' + e.message; }
   }
   hud.textContent =
+    'BUILD ' + BUILD + '\n' +
     'Models: ' + modelsStatus + '\n' +
     'Gyro (magic window): ' + (gyroActive ? 'ACTIVE — rotate phone to look' : 'inactive — drag to look') + '\n' +
     'XR supported: ' + (xrSupported ? 'YES' : 'NO — joystick only here') + '\n' +
