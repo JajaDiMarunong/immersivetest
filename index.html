@@ -62,7 +62,7 @@
 </div>
 
 <div id="joystick-zone"><div id="joystick-knob"></div></div>
-<div id="hint">Drag to look · Joystick to glide · Walk button for real 1:1</div>
+<div id="hint">Rotate phone to look · Joystick to glide · Walk button for real 1:1</div>
 <canvas id="c"></canvas>
 
 <script type="module">
@@ -81,8 +81,32 @@ let xrSession = null;
 let xrSupported = false;
 let modelsStatus = 'loading…';
 let lastError = '';
-// drag-look state (non-XR only)
-let yaw = 0, pitch = 0;
+// drag-look state (non-XR only; drag adds an offset on top of gyro)
+let yaw = 0, pitch = 0;       // drag offsets
+let gyroYaw = 0, gyroPitch = 0; // magic-window gyro base
+let gyroActive = false, alpha0 = null;
+
+function onDeviceOrientation(e) {
+  if (e.alpha === null || e.alpha === undefined || e.beta === null) return;
+  if (alpha0 === null) alpha0 = e.alpha; // calibrate: face the model on load
+  gyroActive = true;
+  // Portrait-held phone: alpha = compass heading, beta = 90 when upright.
+  gyroYaw = THREE.MathUtils.degToRad(e.alpha - alpha0);
+  gyroPitch = THREE.MathUtils.degToRad(e.beta - 90);
+}
+window.addEventListener('deviceorientation', onDeviceOrientation);
+// iOS 13+: gyro needs a user gesture grant — ask once on first touch.
+let orientationAsked = false;
+window.addEventListener('pointerdown', () => {
+  if (orientationAsked) return;
+  orientationAsked = true;
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().catch(() => {});
+    }
+  } catch (e) {}
+}, { once: true });
 
 window.addEventListener('error', (e) => {
   lastError = 'JS error: ' + (e.message || e.error);
@@ -110,6 +134,7 @@ function updateHud() {
   }
   hud.textContent =
     'Models: ' + modelsStatus + '\n' +
+    'Gyro (magic window): ' + (gyroActive ? 'ACTIVE — rotate phone to look' : 'inactive — drag to look') + '\n' +
     'XR supported: ' + (xrSupported ? 'YES' : 'NO — joystick only here') + '\n' +
     'Session: ' + (xrSession ? 'ACTIVE' : 'inactive') +
     ' | presenting: ' + presenting + ' | refSpace: ' + refType + '\n' +
@@ -245,8 +270,10 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(100, now - lastT);
   lastT = now;
   if (!renderer.xr.isPresenting) {
-    rig.rotation.set(0, yaw, 0);
-    camera.rotation.set(pitch, 0, 0);
+    const totalPitch = Math.max(-1.4, Math.min(1.4, gyroPitch + pitch));
+    // Gyro yaw wraps 0-360; keep drag offset separate so calibration never jumps.
+    rig.rotation.set(0, gyroYaw + yaw, 0);
+    camera.rotation.set(totalPitch, 0, 0);
   }
   tickJoystick(dt);
   renderer.render(scene, camera);
@@ -274,7 +301,7 @@ async function checkSupport() {
 renderer.xr.addEventListener('sessionstart', () => {
   rig.position.set(0, 0, 0); // local-floor: y=0 is the floor, pose already includes eye height
   rig.rotation.set(0, 0, 0);
-  yaw = 0; pitch = 0;
+  yaw = 0; pitch = 0; alpha0 = null;
   btnExit.style.display = 'inline-block';
   btnWalk.disabled = true;
   hint.textContent = 'Walk in real life — RAW tracking pos must change';
@@ -284,10 +311,10 @@ renderer.xr.addEventListener('sessionend', () => {
   xrSession = null;
   rig.position.set(0, 1.6, 0);
   rig.rotation.set(0, 0, 0);
-  yaw = 0; pitch = 0;
+  yaw = 0; pitch = 0; alpha0 = null; // recalibrate gyro on return
   btnExit.style.display = 'none';
   btnWalk.disabled = !xrSupported;
-  hint.textContent = 'Drag to look · Joystick to glide · Walk button for real 1:1';
+  hint.textContent = 'Rotate phone to look · Joystick to glide · Walk button for real 1:1';
   updateHud();
 });
 
