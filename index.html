@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>MacArthur Immersive Walk Test (1:1)</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; font-family: system-ui, sans-serif; }
+  #overlay {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    padding: 10px 12px; color: #fff;
+    background: linear-gradient(rgba(0,0,0,.75), rgba(0,0,0,0));
+    pointer-events: none;
+  }
+  #overlay .row { display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
+  button {
+    pointer-events: auto; border: 0; border-radius: 10px; padding: 10px 14px;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  #btn-walk { background: #4caf7d; color: #fff; }
+  #btn-walk:disabled { background: #555; color: #bbb; }
+  #btn-exit-xr { background: #b05252; color: #fff; }
+  #btn-back { background: #333; color: #fff; }
+  #hud {
+    margin-top: 8px; font-size: 12px; line-height: 1.5; white-space: pre-wrap;
+    background: rgba(0,0,0,.55); border-radius: 8px; padding: 8px 10px;
+    pointer-events: none; max-width: 520px;
+  }
+  #hint {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    color: #fff; font-size: 13px; background: rgba(0,0,0,.6);
+    padding: 8px 12px; border-radius: 20px; z-index: 10; white-space: nowrap;
+  }
+  #joystick-zone {
+    position: fixed; right: 18px; bottom: 64px; width: 110px; height: 110px;
+    border-radius: 50%; background: rgba(255,255,255,.12);
+    border: 2px solid rgba(255,255,255,.35); z-index: 10; touch-action: none;
+  }
+  #joystick-knob {
+    position: absolute; left: 50%; top: 50%; width: 48px; height: 48px;
+    margin: -24px 0 0 -24px; border-radius: 50%; background: rgba(255,255,255,.75);
+  }
+  a-scene { position: fixed; inset: 0; }
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <div class="row">
+    <button id="btn-walk">Enter 1:1 Walk (WebXR)</button>
+    <button id="btn-exit-xr" class="hidden" style="display:none;">Exit Walk</button>
+    <button id="btn-back" onclick="location.href='../testnewgbr/index.html'">← Main App</button>
+  </div>
+  <div id="hud">checking WebXR support…</div>
+</div>
+
+<div id="joystick-zone"><div id="joystick-knob"></div></div>
+<div id="hint">Drag to look · Joystick to glide · Walk button for real 1:1</div>
+
+<!-- Same MacArthur data as testnewgbr/app.js, copied (not imported) so main file is untouched -->
+<a-scene
+  id="scene"
+  embedded
+  vr-mode-ui="enabled: false"
+  device-orientation-permission-ui="enabled: false"
+  webxr="referenceSpaceType: local-floor; requiredFeatures: local-floor; optionalFeatures: hit-test;"
+  renderer="colorManagement: true"
+>
+  <a-entity id="rig" position="0 1.6 0">
+    <a-entity id="test-camera" camera
+      look-controls="touchEnabled: true; mouseEnabled: true; magicWindowTrackingEnabled: true"
+      joystick-rig-move="speed: 0.004"></a-entity>
+  </a-entity>
+
+  <!-- Skybox (same file/scale as main app) -->
+  <a-entity gltf-model="./assets/beachskybox.optimized.glb"
+    position="0 0 0" scale="100 100 100"></a-entity>
+
+  <!-- MacArthur model (same transform as main app) -->
+  <a-entity gltf-model="./assets/mcarthur.optimized.glb"
+    position="0 0 -3" rotation="0 270 0" scale="3.5 3.5 3.5"></a-entity>
+
+  <a-light type="ambient" color="#ffffff" intensity="0.6"></a-light>
+  <a-light type="directional" color="#ffffff" intensity="0.4" position="-1 2 1"></a-light>
+</a-scene>
+
+<script>
+  // Joystick moves the RIG (works in both magic-window + XR).
+  // Copied pattern from testnewgbr/app.js joystick-movement, retargeted to #rig.
+  AFRAME.registerComponent("joystick-rig-move", {
+    schema: { speed: { default: 0.004 } },
+    init: function () {
+      this.moveVector = { x: 0, y: 0 };
+      this.zone = document.getElementById("joystick-zone");
+      this.knob = document.getElementById("joystick-knob");
+      this.rig = document.getElementById("rig");
+      this.active = false;
+      this.maxDist = 40;
+      this.center = { x: 0, y: 0 };
+      this.start = this.start.bind(this);
+      this.move = this.move.bind(this);
+      this.end = this.end.bind(this);
+      this.zone.addEventListener("touchstart", this.start, { passive: false });
+      this.zone.addEventListener("mousedown", this.start);
+      window.addEventListener("touchmove", this.move, { passive: false });
+      window.addEventListener("mousemove", this.move);
+      window.addEventListener("touchend", this.end);
+      window.addEventListener("touchcancel", this.end);
+      window.addEventListener("mouseup", this.end);
+    },
+    start: function (e) {
+      e.preventDefault();
+      this.active = true;
+      var cx = e.touches ? e.touches[0].clientX : e.clientX;
+      var cy = e.touches ? e.touches[0].clientY : e.clientY;
+      var rect = this.zone.getBoundingClientRect();
+      this.center.x = rect.left + rect.width / 2;
+      this.center.y = rect.top + rect.height / 2;
+      this.update(cx, cy);
+    },
+    move: function (e) {
+      if (!this.active) return;
+      if (e.touches && e.touches.length > 1) return;
+      e.preventDefault();
+      var cx = e.touches ? e.touches[0].clientX : e.clientX;
+      var cy = e.touches ? e.touches[0].clientY : e.clientY;
+      this.update(cx, cy);
+    },
+    end: function () {
+      if (!this.active) return;
+      this.active = false;
+      this.moveVector.x = 0; this.moveVector.y = 0;
+      this.knob.style.transform = "translate(0px, 0px)";
+    },
+    update: function (x, y) {
+      var dx = x - this.center.x, dy = y - this.center.y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > this.maxDist) {
+        var a = Math.atan2(dy, dx);
+        dx = Math.cos(a) * this.maxDist; dy = Math.sin(a) * this.maxDist;
+      }
+      this.knob.style.transform = "translate(" + dx + "px," + dy + "px)";
+      this.moveVector.x = dx / this.maxDist; this.moveVector.y = dy / this.maxDist;
+    },
+    tick: function (_t, dt) {
+      if (!this.active) return;
+      var cam = this.el.object3D;
+      var dir = new THREE.Vector3();
+      cam.getWorldDirection(dir); dir.y = 0; dir.normalize();
+      var right = new THREE.Vector3();
+      right.crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
+      var s = this.data.speed * dt;
+      this.rig.object3D.position.add(dir.multiplyScalar(this.moveVector.y * s));
+      this.rig.object3D.position.add(right.multiplyScalar(-this.moveVector.x * s));
+    }
+  });
+
+  var hud = document.getElementById("hud");
+  var btnWalk = document.getElementById("btn-walk");
+  var btnExitXr = document.getElementById("btn-exit-xr");
+  var sceneEl = document.getElementById("scene");
+  var xrSession = null;
+  var xrSupported = false;
+
+  function setHud(extra) {
+    var cam = document.getElementById("test-camera");
+    var p = new THREE.Vector3();
+    if (cam && cam.object3D) cam.object3D.getWorldPosition(p);
+    hud.textContent =
+      "Model: MacArthur (same as main app)\n" +
+      "XR supported: " + (xrSupported ? "YES — 1:1 walk available" : "NO — joystick only on this device/browser") + "\n" +
+      "XR session: " + (xrSession ? "ACTIVE — walk in real life to move" : "inactive (magic-window + joystick)") + "\n" +
+      "Camera world pos: " + p.x.toFixed(2) + ", " + p.y.toFixed(2) + ", " + p.z.toFixed(2) + "\n" +
+      (extra ? extra : "");
+  }
+
+  // iOS permission (harmless on Android, keeps parity with main app)
+  async function ensureOrientationPermission() {
+    try {
+      if (typeof DeviceOrientationEvent !== "undefined" &&
+          typeof DeviceOrientationEvent.requestPermission === "function") {
+        await DeviceOrientationEvent.requestPermission();
+      }
+    } catch (e) { console.warn(e); }
+  }
+
+  async function checkXrSupport() {
+    if (!("xr" in navigator)) { xrSupported = false; setHud(); btnWalk.disabled = true; btnWalk.textContent = "WebXR not in this browser"; return; }
+    try {
+      xrSupported = await navigator.xr.isSessionSupported("immersive-ar");
+    } catch (e) { xrSupported = false; }
+    if (!xrSupported) { btnWalk.disabled = true; btnWalk.textContent = "1:1 Walk not supported here"; }
+    setHud();
+  }
+
+  btnWalk.addEventListener("click", async function () {
+    await ensureOrientationPermission();
+    try {
+      xrSession = await navigator.xr.requestSession("immersive-ar", {
+        requiredFeatures: ["local-floor"],
+        optionalFeatures: ["hit-test"]
+      });
+      // Hand the session to A-Frame's WebGL renderer = true 1:1 phone pose tracking.
+      await sceneEl.renderer.xr.setSession(xrSession);
+      btnExitXr.style.display = "inline-block";
+      btnWalk.disabled = true;
+      document.getElementById("hint").textContent = "Walk in real life — camera moves 1:1";
+      xrSession.addEventListener("end", function () {
+        xrSession = null;
+        btnExitXr.style.display = "none";
+        btnWalk.disabled = false;
+        document.getElementById("hint").textContent = "Drag to look · Joystick to glide · Walk button for real 1:1";
+        setHud();
+      });
+      setHud();
+    } catch (err) {
+      console.error(err);
+      setHud("Could not start walk mode: " + (err && err.message ? err.message : err) + "\nTip: use Chrome on Android, HTTPS, ARCore-enabled phone.");
+    }
+  });
+
+  btnExitXr.addEventListener("click", async function () {
+    try { if (xrSession) await xrSession.end(); } catch (e) { console.warn(e); }
+  });
+
+  sceneEl.addEventListener("loaded", function () { checkXrSupport(); });
+  setInterval(setHud, 500);
+  checkXrSupport();
+</script>
+</body>
+</html>
